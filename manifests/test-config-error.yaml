@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-error
+  labels:
+    test: diagnosis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: config-error
+  template:
+    metadata:
+      labels:
+        app: config-error
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        volumeMounts:
+        - name: missing-secret
+          mountPath: /etc/missing
+      volumes:
+      - name: missing-secret
+        secret:
+          secretName: does-not-exist

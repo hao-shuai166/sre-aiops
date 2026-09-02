@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-oom
+  labels:
+    test: diagnosis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-oom
+  template:
+    metadata:
+      labels:
+        app: nginx-oom
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        resources:
+          limits:
+            memory: "10Mi"
+          requests:
+            memory: "10Mi"

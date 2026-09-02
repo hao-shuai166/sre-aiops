@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sched-fail
+  labels:
+    test: diagnosis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sched-fail
+  template:
+    metadata:
+      labels:
+        app: sched-fail
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        resources:
+          requests:
+            cpu: "100"
+            memory: "500Gi"

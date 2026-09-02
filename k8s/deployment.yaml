@@ -1,0 +1,139 @@
+---
+# ============================================================================
+# Namespace
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-system
+
+---
+# ============================================================================
+# Secret — sensitive credentials (API keys, model config)
+# ⚠️  Replace placeholder values before applying.
+#     NEVER commit actual API keys to Git.
+#     In production, use a sealed-secrets controller or external-secrets.
+# ============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sre-agent-secrets
+  namespace: sre-system
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "sk-your-deepseek-key-here"
+  OPENAI_BASE_URL: "https://api.deepseek.com"
+  LLM_MODEL: "deepseek-v4-pro"
+
+---
+# ============================================================================
+# ServiceAccount
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-agent
+  namespace: sre-system
+
+---
+# ============================================================================
+# ClusterRole — read-only access to pods, logs, events (cluster-wide)
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-agent-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list"]
+
+---
+# ============================================================================
+# ClusterRoleBinding
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-agent-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: sre-agent
+    namespace: sre-system
+roleRef:
+  kind: ClusterRole
+  name: sre-agent-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ============================================================================
+# Deployment
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent
+  namespace: sre-system
+  labels:
+    app: sre-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-agent
+  template:
+    metadata:
+      labels:
+        app: sre-agent
+    spec:
+      serviceAccountName: sre-agent
+      containers:
+        - name: sre-agent
+          image: sre-agent:0.1.0
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            - name: K8S_MODE
+              value: "real"
+          envFrom:
+            - secretRef:
+                name: sre-agent-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+# ============================================================================
+# Service
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-agent
+  namespace: sre-system
+spec:
+  selector:
+    app: sre-agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP

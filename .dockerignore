@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Environment & secrets
+.env
+*.pem
+*.key
+
+# IDE & tools
+.workbuddy/
+.vscode/
+.idea/
+
+# VCS
+.git/
+.gitignore
+
+# Docs & tests (not needed at runtime)
+docs/
+tests/
+examples/
+
+# OS noise
+Thumbs.db
+.DS_Store
