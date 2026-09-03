@@ -1,38 +1,56 @@
-# ---- Stage 1: Builder ---- 
+# syntax=docker/dockerfile:1
+
+# ============================================================================
+# Stage 1: builder
+#   Build the project wheel AND download every runtime dependency wheel into
+#   /wheels, so Stage 2 can install fully offline (no second network round-trip
+#   for fastapi / langgraph / openai / kubernetes / mcp etc.).
+# ============================================================================
 FROM python:3.12-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /build
 
-# Install build dependencies only
-RUN pip install --no-cache-dir hatchling
-
-# Copy just the build manifest and source
+# Copy only the build manifest + source. Keeping this layer isolated lets
+# Docker cache the dependency wheels across code-only changes.
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Build a wheel
-RUN pip wheel . --wheel-dir=/build/wheels
+# Collect the project wheel + all dependency wheels into /wheels.
+RUN pip wheel --wheel-dir=/wheels .
 
-# ---- Stage 2: Runtime ----
+# ============================================================================
+# Stage 2: runtime
+#   Minimal image: no build tooling, no network installs, non-root user.
+# ============================================================================
 FROM python:3.12-slim AS runtime
 
 LABEL org.opencontainers.image.title="Infrastructure Agent"
 LABEL org.opencontainers.image.description="AI-Native SRE Platform — Kubernetes 智能故障诊断"
-LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.version="0.2.0"
 
-# Create non-root user
+# Unbuffered stdout is important for an SRE tool — logs appear immediately.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Non-root user
 RUN groupadd -r sre && useradd -r -g sre -d /app sre
 
 WORKDIR /app
 
-# Copy and install the built wheel
-COPY --from=builder /build/wheels/*.whl /tmp/wheels/
-RUN pip install --no-cache-dir /tmp/wheels/*.whl && rm -rf /tmp/wheels
+# Install the project + all dependencies from the collected wheels, offline.
+COPY --from=builder /wheels /tmp/wheels
+RUN pip install --no-index --find-links=/tmp/wheels infrastructure-agent \
+    && rm -rf /tmp/wheels
 
 # Switch to non-root user
 USER sre
 
-# Container health check — FastAPI /health endpoint
+# Health check — FastAPI /health endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 

@@ -89,7 +89,7 @@ spec:
       serviceAccountName: sre-agent
       containers:
         - name: sre-agent
-          image: sre-agent:0.1.0
+          image: sre-agent:0.2.0
           imagePullPolicy: Never
           ports:
             - containerPort: 8000

@@ -1,6 +1,6 @@
 [project]
 name = "infrastructure-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI Native Infrastructure Operations Platform — Kubernetes 智能故障诊断 Agent"
 readme = "README.md"
 requires-python = ">=3.12"
