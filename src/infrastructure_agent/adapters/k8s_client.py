@@ -222,6 +222,33 @@ class KubernetesClient:
             return self._get_logs_mock(pod, container, tail)
         return await self._get_logs_real(namespace, pod, container, tail)
 
+    async def get_metrics(
+        self, cluster: str, namespace: str, pod: str
+    ) -> dict[str, Any]:
+        """Get container resource metrics (Prometheus-backed in the future).
+
+        Only pods whose containers actually ran have metrics. Pending /
+        ImagePullBackOff / FailedMount pods return a structured NotAvailable error.
+        """
+        if self._mode == "mock":
+            return self._get_metrics_mock(pod)
+        return await self._get_metrics_real(namespace, pod)
+
+    async def list_pods(
+        self,
+        cluster: str,
+        namespace: str = "default",
+        label_selector: str | None = None,
+    ) -> dict[str, Any]:
+        """List pods in a namespace with a compact status summary.
+
+        Used by the agent to discover/verify the target pod when the user's
+        description is ambiguous.
+        """
+        if self._mode == "mock":
+            return self._get_list_pods_mock(namespace)
+        return await self._list_pods_real(namespace, label_selector)
+
     # ---- Mock implementations ----
 
     def _pick_scenario(self, pod_name: str) -> str:
@@ -229,6 +256,8 @@ class KubernetesClient:
         _POD_ALIASES: dict[str, str] = {
             "sched_fail": "failed_scheduling",
             "sched-fail": "failed_scheduling",
+            "sched_failpod": "failed_scheduling",
+            "sched-failpod": "failed_scheduling",
             "image_pull": "image_pull",
             "image-pull": "image_pull",
             "config_error": "config_error",
@@ -284,6 +313,63 @@ class KubernetesClient:
                 "container": container,
                 "logs": logs.lines[-tail:],
             },
+        }
+
+    # Mock pod inventory so the agent can discover targets in mock mode too.
+    _MOCK_POD_INVENTORY: list[tuple[str, str]] = [
+        ("nginx-oom", "oom"),
+        ("nginx-image-pull", "image_pull"),
+        ("test-config-error", "config_error"),
+        ("test-sched-fail", "failed_scheduling"),
+        ("sched-failpod", "failed_scheduling"),
+        ("nginx-app", "app_error"),
+    ]
+
+    def _get_metrics_mock(self, pod: str) -> dict[str, Any]:
+        scenario = self._pick_scenario(pod)
+        # Only scenarios where the container actually ran expose metrics.
+        if scenario == "oom":
+            data = {
+                "metric": "container_memory_usage_bytes",
+                "usage": "512Mi / 512Mi (100%)",
+                "limit": "512Mi",
+            }
+            return {"result": "success", "data": data}
+        if scenario == "app_error":
+            data = {
+                "metric": "container_memory_usage_bytes",
+                "usage": "210Mi / 512Mi (41%)",
+                "limit": "512Mi",
+            }
+            return {"result": "success", "data": data}
+        return {
+            "result": "error",
+            "error_type": "NotAvailable",
+            "message": f"Pod '{pod}' 的容器未运行（Pending/镜像拉取失败/挂载失败），无资源指标",
+        }
+
+    def _get_list_pods_mock(self, namespace: str) -> dict[str, Any]:
+        if namespace and namespace != "default":
+            return {
+                "result": "success",
+                "data": {"namespace": namespace, "pods": []},
+            }
+        pods = []
+        for pod_name, scenario in self._MOCK_POD_INVENTORY:
+            p = MOCK_SCENARIOS[scenario]["pod"]
+            container_reason = (
+                p.containers[0].get("reason") if p.containers else None
+            )
+            pods.append({
+                "name": pod_name,
+                "namespace": "default",
+                "phase": p.status,
+                "restart_count": p.restart_count,
+                "reason": p.reason or container_reason,
+            })
+        return {
+            "result": "success",
+            "data": {"namespace": "default", "pods": pods},
         }
 
     # ---- Real implementations ----
@@ -424,6 +510,58 @@ class KubernetesClient:
                 "container": container,
                 "logs": lines[-tail:],
             },
+        }
+
+    async def _get_metrics_real(
+        self, namespace: str, pod: str
+    ) -> dict[str, Any]:
+        """Real metrics require a Prometheus source, which is not wired yet.
+
+        Returns a structured NotAvailable error so the agent knows to look
+        elsewhere instead of guessing.
+        """
+        return {
+            "result": "error",
+            "error_type": "NotAvailable",
+            "message": f"Prometheus metrics source not configured — cannot fetch metrics for {namespace}/{pod}",
+        }
+
+    async def _list_pods_real(
+        self,
+        namespace: str = "default",
+        label_selector: str | None = None,
+    ) -> dict[str, Any]:
+        """List pods from the live K8s API with a compact status summary."""
+        try:
+            v1 = k8s_client.CoreV1Api()
+            pods = await asyncio.to_thread(
+                v1.list_namespaced_pod,
+                namespace=namespace,
+                label_selector=label_selector,
+            )
+        except k8s_client.ApiException as e:
+            return self._api_error(e, f"Pods in {namespace}")
+
+        items = []
+        for p in pods.items:
+            status = p.status
+            reason: str | None = None
+            restart_count = 0
+            for cs in status.container_statuses or []:
+                restart_count += cs.restart_count
+                if cs.state.waiting and reason is None:
+                    reason = cs.state.waiting.reason
+            items.append({
+                "name": p.metadata.name,
+                "namespace": namespace,
+                "phase": status.phase or "Unknown",
+                "restart_count": restart_count,
+                "reason": reason,
+            })
+
+        return {
+            "result": "success",
+            "data": {"namespace": namespace, "pods": items},
         }
 
     # ---- Error handling ----

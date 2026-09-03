@@ -127,24 +127,86 @@ class EvidenceBuilder:
         raw: dict,
         namespace: str,
         pod: str,
-        container: str,
+        container: str | None = None,
     ) -> Evidence:
         """Convert get_logs() response → Evidence. Per tool-design.md §7.3."""
         if self._is_error(raw):
-            return self._error_evidence("ContainerLog", namespace, pod, container, raw)
+            return self._error_evidence(
+                "ContainerLog", namespace, pod, container or "app", raw
+            )
         data = raw["data"]
+        # container arg may be omitted (agent loop) — adapter embeds it in data.
+        resolved_container = container or data.get("container") or "app"
         return Evidence(
             id=self._next_id(),
             type="ContainerLog",
             source=self._make_source("kubernetes", "logs"),
             timestamp=datetime.now(timezone.utc),
-            resource=self._make_resource(namespace, pod, container),
+            resource=self._make_resource(namespace, pod, resolved_container),
             content={
-                "container": data["container"],
+                "container": resolved_container,
                 "logs": data["logs"],
             },
             confidence=0.90,
         )
+
+    def build_from_metrics(
+        self,
+        raw: dict,
+        namespace: str,
+        pod: str,
+    ) -> Evidence:
+        """Convert get_metrics() response → Evidence (Metric type)."""
+        if self._is_error(raw):
+            return self._error_evidence("Metric", namespace, pod, None, raw)
+        data = raw["data"]
+        return Evidence(
+            id=self._next_id(),
+            type="Metric",
+            source=self._make_source("prometheus", "query_range"),
+            timestamp=datetime.now(timezone.utc),
+            resource=self._make_resource(namespace, pod),
+            content={
+                "metric": data.get("metric"),
+                "usage": data.get("usage"),
+                "limit": data.get("limit"),
+            },
+            confidence=0.90,
+        )
+
+    def build_from_tool_result(
+        self,
+        tool_name: str,
+        raw: dict,
+        namespace: str,
+        pod: str,
+        container: str | None = None,
+    ) -> Evidence:
+        """Unified dispatcher: tool name → the right per-tool converter.
+
+        This is the ONLY entry point the agent loop (P1) needs to turn a tool
+        result into 7-dim Evidence.
+        """
+        converters = {
+            "get_pod_status": self.build_from_get_pod,
+            "list_pod_events": self.build_from_get_events,
+            "get_container_logs": self.build_from_get_logs,
+            "get_pod_metrics": self.build_from_metrics,
+        }
+        converter = converters.get(tool_name)
+        if converter is None:
+            return Evidence(
+                id=self._next_id(),
+                type="ToolResult",
+                source=self._make_source("internal", "tool"),
+                timestamp=datetime.now(timezone.utc),
+                resource=self._make_resource(namespace, pod, container),
+                content={"tool": tool_name, "raw": raw},
+                confidence=0.0,
+            )
+        if tool_name == "get_container_logs":
+            return converter(raw, namespace, pod, container)
+        return converter(raw, namespace, pod)
 
     def reset_counter(self) -> None:
         """Reset evidence ID counter. Useful for testing."""
