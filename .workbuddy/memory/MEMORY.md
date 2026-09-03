@@ -16,21 +16,26 @@
 - LLM 不是独立层，注入到 Agent/Workflow 内部决策节点（V2 渐进替换）
 - V1 全规则驱动，V2 逐步引入 LLM
 
-## Current State (2026-07-31)
+## Current State (2026-09-03, feature/agent-investigation 分支)
 
-- Sprint 1 完成：6 层代码 + 5 个 Mock 场景端到端测试通过
-- **5/5 场景真实 K8s 集群验证全部通过**（CrashLoopBackOff / ImagePullBackOff / OOMKilled / ConfigError / FailedScheduling）
-- 设计文档 4 份 + ADR-0001 全部评审通过
-- **LLM 层已接入 rca_node 并验证生效**：DeepSeek v4 Pro (api.deepseek.com) + RCA Prompts + 规则 fallback
-- PodStatus 支持 lastState 捕获（last_exit_code / last_reason / last_message）
-- Events 查询按 Pod name + kind=Pod 过滤
-- classify_event 两级检查（PodStatus 容器 reason + Events reason/message）
-- decision_node 按诊断路径分流 confidence（避免死循环）
-- API 层全局异常捕获：工作流异常返回结构化错误而非裸 500
-- classify_intent 和 decision_node 仍为规则驱动（下一步 LLM 化候选）
+- **P1 ReAct 循环已完成**：`agent/agent_workflow.py`（init → agent ⇄ execute_tool），LLM（DeepSeek）每轮自主决定调哪个工具或下结论；固定 workflow 保留，`AGENT_WORKFLOW=react|fixed` 切换（默认 react）
+- 工具层 P0：`tools/registry.py`（ToolSpec/校验/memoize）+ 5 细粒度工具（get_pod_status/list_pod_events/get_container_logs/get_pod_metrics/list_pods）
+- 无规则 RCA 兜底（用户决策）：LLM 挂了返回结构化错误 rca_mode=error；步数上限 8 → LLM 强收尾
+- API 响应含 rca_mode（llm/error）；reasoning_trace 含每步 thought + 工具结果
+- mock + 真实 DeepSeek 验证 6/6 场景通过，工具路径符合 SRE 习惯（status → events → 按需 logs/metrics）
+- master（a1031d7）仍是固定 workflow 版本；5 场景真实 K8s 验证在 master 完成
+
+## Next Steps
+
+- P2: 新旧流程 A/B 对比（同题对比结论与调查路径质量）
+- P3: 真实集群验证 ReAct 版
+- 仓库卫生待用户决定：.env（含 API key）已被跟踪，建议移出并加 .gitignore（.gitignore 已写好该条目但 .env 仍被跟踪）
+- 规划中方向（用户意向）：后端通用化 → MCP Client + ReAct Agent，前端提供 MCP Server 选择，K8s 逻辑拆为独立诊断增强版 MCP Server
 
 ## Key Design Decisions
 
+- **P1 架构决策（2026-09-03）**：删除规则 RCA 兜底（LLM 挂 → 结构化错误）；细粒度 5 工具；新分支开发；超步数用 LLM 强收尾
+- ReAct 决策输出必须严格 JSON（next=tool/answer 两态），非法输出带纠正提示重试 1 次
 - LangGraph conditional_edge 路由函数只返回路由字符串 → decision_node + route_after_decision 分拆
 - Mock 场景匹配同时支持下划线和连字符
 - WorkflowState 继承 AgentState，额外属性通过 __init_node 设置
