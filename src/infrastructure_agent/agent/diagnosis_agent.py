@@ -8,6 +8,7 @@ Per agent-flow.md §4 and §5, the Agent Layer:
 """
 
 import logging
+import os
 import traceback
 from datetime import datetime, timezone
 
@@ -19,8 +20,17 @@ from infrastructure_agent.workflow.pod_crash_workflow import build_crashloop_gra
 
 logger = logging.getLogger(__name__)
 
-# Cache the compiled graph so it's built once
+# Cached compiled graphs — built once per process
+_react_graph = None
 _crashloop_graph = None
+
+
+def _get_react_graph():
+    global _react_graph
+    if _react_graph is None:
+        from infrastructure_agent.agent.agent_workflow import build_investigation_graph
+        _react_graph = build_investigation_graph()
+    return _react_graph
 
 
 def _get_crashloop_graph():
@@ -28,6 +38,18 @@ def _get_crashloop_graph():
     if _crashloop_graph is None:
         _crashloop_graph = build_crashloop_graph()
     return _crashloop_graph
+
+
+def _get_workflow_graph():
+    """Select the workflow implementation.
+
+    AGENT_WORKFLOW=react (default) — P1 ReAct loop, LLM autonomously picks tools.
+    AGENT_WORKFLOW=fixed         — legacy fixed graph, kept for A/B and rollback.
+    """
+    mode = os.getenv("AGENT_WORKFLOW", "react").lower()
+    if mode == "fixed":
+        return _get_crashloop_graph()
+    return _get_react_graph()
 
 
 # ---- Intent classification (keyword-based for V1) ----
@@ -120,8 +142,8 @@ async def diagnose(user_input: str, user: str = "anonymous") -> dict:
 
 
 async def _run_pod_diagnosis(user_input: str, user: str, intent: dict) -> dict:
-    """Run the CrashLoopBackOff workflow and return structured results."""
-    graph = _get_crashloop_graph()
+    """Run the investigation workflow and return structured results."""
+    graph = _get_workflow_graph()
 
     initial_state = AgentState(
         request=RequestContext(
@@ -155,13 +177,26 @@ async def _run_pod_diagnosis(user_input: str, user: str, intent: dict) -> dict:
             }],
         }
 
-    # rca_mode lives on WorkflowState, not AgentState — pull it from the raw result
+    # rca_mode lives on the extended state, not AgentState — pull from raw result
     rca_mode = str(result.get("rca_mode", "unknown"))
+    error_message = str(result.get("error", "") or "")
 
     final_state = AgentState(**result)
 
     diagnosis = final_state.diagnosis
     if diagnosis is None:
+        if error_message or rca_mode == "error":
+            # ReAct loop aborted (LLM unavailable / invalid decisions) —
+            # by design there is no rule-based fallback (decision ①).
+            return {
+                "problem": "diagnosis_error",
+                "root_cause": error_message or "LLM 调用失败，自主调查中断",
+                "evidence": [ev.model_dump() for ev in final_state.evidence],
+                "suggestion": "请确认 OPENAI_API_KEY 配置有效后重试；服务端日志中有详细失败原因",
+                "confidence": 0.0,
+                "rca_mode": "error",
+                "reasoning_trace": [r.model_dump() for r in final_state.reasoning],
+            }
         return {
             "problem": "incomplete",
             "root_cause": "诊断未完成",

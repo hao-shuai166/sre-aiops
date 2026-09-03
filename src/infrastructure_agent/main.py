@@ -47,6 +47,10 @@ class DiagnoseResponse(BaseModel):
     evidence: list[dict] = Field(description="Evidence chain supporting the diagnosis")
     suggestion: str = Field(description="Actionable suggestion to fix the problem")
     confidence: float = Field(description="Overall diagnosis confidence (0.0-1.0)")
+    rca_mode: str = Field(
+        default="unknown",
+        description="How the conclusion was produced: llm / error / unknown",
+    )
     reasoning_trace: list[dict] = Field(description="Step-by-step reasoning trace")
 
 
