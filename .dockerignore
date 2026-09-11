@@ -20,6 +20,10 @@ build/
 .git/
 .gitignore
 
+# Frontend — heavy local artifacts; the image builds its own inside Docker
+frontend/node_modules/
+frontend/dist/
+
 # Docs & tests (not needed at runtime)
 docs/
 tests/
