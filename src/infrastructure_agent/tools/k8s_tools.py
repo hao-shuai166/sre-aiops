@@ -39,6 +39,19 @@ def _first_container_name(raw: dict) -> str | None:
     return None
 
 
+def _coerce_tail(tail: object) -> int:
+    """Clamp tail to [1, MAX_TAIL]; fall back to DEFAULT_TAIL on garbage.
+
+    The schema declares integer (1-200), but the LLM occasionally emits
+    strings ("50") — coerce instead of failing the whole tool call.
+    """
+    try:
+        n = int(tail)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_TAIL
+    return max(1, min(n, MAX_TAIL))
+
+
 async def get_pod_status(namespace: str = "default", pod: str = "") -> dict:
     """Get Pod current status (phase, restart count, container states,
     exit code incl. lastState for CrashLoopBackOff)."""
@@ -57,17 +70,32 @@ async def get_container_logs(
     tail: int = DEFAULT_TAIL,
 ) -> dict:
     """Get container logs. When container is omitted the first container of the
-    pod is used automatically."""
+    pod is used automatically — the internal get_pod query this requires is
+    recorded in ``_meta`` so the audit trail shows every API call made."""
+    tail_lines = _coerce_tail(tail)
+    container_source = "explicit"
     if not container:
+        # Internal query: resolve the pod's first container. NOT memoized
+        # (handlers have no cache access) and NOT evidence — but disclosed
+        # via _meta so the reasoning trace stays honest.
         pod_raw = await _k8s.get_pod(cluster=_cluster(), namespace=namespace, pod=pod)
         container = _first_container_name(pod_raw) or "app"
-    return await _k8s.get_logs(
+        container_source = "auto_first_container"
+    raw = await _k8s.get_logs(
         cluster=_cluster(),
         namespace=namespace,
         pod=pod,
         container=container,
-        tail=min(max(int(tail), 1), MAX_TAIL),
+        tail=tail_lines,
     )
+    if isinstance(raw, dict):
+        meta = raw.setdefault("_meta", {})
+        meta["container"] = container
+        meta["container_source"] = container_source
+        if container_source == "auto_first_container":
+            meta["internal_queries"] = [{"tool": "get_pod_status", "purpose": "resolve first container"}]
+        meta["tail"] = tail_lines
+    return raw
 
 
 async def get_pod_metrics(namespace: str = "default", pod: str = "") -> dict:
@@ -97,12 +125,22 @@ def _schema(**properties) -> dict:
     return schema
 
 
-def _param(desc: str, required: bool = False, default: Any = None) -> dict:
+def _param(
+    desc: str,
+    required: bool = False,
+    default: Any = None,
+    ptype: str = "string",
+    **constraints: Any,
+) -> dict:
+    """One schema property. ``constraints`` (minimum/maximum/...) are merged
+    verbatim into the property, e.g. ``_param("...", ptype="integer",
+    minimum=1, maximum=200)``."""
     meta: dict[str, Any] = {
-        "type": "string",
+        "type": ptype,
         "description": desc,
         "__required__": required,
     }
+    meta.update(constraints)
     if default is not None:
         meta["default"] = default
     return meta
@@ -147,7 +185,13 @@ K8S_TOOL_SPECS: list[ToolSpec] = [
             namespace=_param("Pod 所在命名空间，默认 default", default="default"),
             pod=_param("要查日志的 Pod 名称", required=True),
             container=_param("容器名，省略时自动取 Pod 第一个容器", default=None),
-            tail=_param("返回日志行数（1-200），默认 50", default=DEFAULT_TAIL),
+            tail=_param(
+                "返回日志行数（整数 1-200），默认 50",
+                default=DEFAULT_TAIL,
+                ptype="integer",
+                minimum=1,
+                maximum=MAX_TAIL,
+            ),
         ),
         handler=get_container_logs,
     ),

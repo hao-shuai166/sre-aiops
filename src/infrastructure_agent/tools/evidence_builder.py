@@ -137,16 +137,25 @@ class EvidenceBuilder:
         data = raw["data"]
         # container arg may be omitted (agent loop) — adapter embeds it in data.
         resolved_container = container or data.get("container") or "app"
+        # Surface the audit metadata written by the tool layer: how the
+        # container was resolved (explicit vs auto first-container via an
+        # internal get_pod query) and the clamped tail line count.
+        meta = raw.get("_meta", {})
+        content = {
+            "container": resolved_container,
+            "logs": data["logs"],
+        }
+        if meta.get("container_source"):
+            content["container_source"] = meta["container_source"]
+        if meta.get("tail") is not None:
+            content["tail"] = meta["tail"]
         return Evidence(
             id=self._next_id(),
             type="ContainerLog",
             source=self._make_source("kubernetes", "logs"),
             timestamp=datetime.now(timezone.utc),
             resource=self._make_resource(namespace, pod, resolved_container),
-            content={
-                "container": resolved_container,
-                "logs": data["logs"],
-            },
+            content=content,
             confidence=0.90,
         )
 
