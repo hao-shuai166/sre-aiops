@@ -11,13 +11,19 @@ import os
 from typing import Any
 
 from infrastructure_agent.adapters.k8s_client import KubernetesClient
+from infrastructure_agent.agent.target_resolver import default_cluster
 from infrastructure_agent.tools.registry import ToolRegistry, ToolSpec
 
 _k8s = KubernetesClient(mode=os.getenv("K8S_MODE", "mock"))
-_CLUSTER = "prod"  # ignored in mock mode; real mode uses the kubeconfig context
 
 DEFAULT_TAIL = 50
 MAX_TAIL = 200
+
+
+def _cluster() -> str:
+    """Cluster label (K8S_CLUSTER env, default prod). Ignored in mock mode;
+    real mode connects via the adapter's own kubeconfig context."""
+    return default_cluster()
 
 
 # ---- Handlers ----
@@ -36,12 +42,12 @@ def _first_container_name(raw: dict) -> str | None:
 async def get_pod_status(namespace: str = "default", pod: str = "") -> dict:
     """Get Pod current status (phase, restart count, container states,
     exit code incl. lastState for CrashLoopBackOff)."""
-    return await _k8s.get_pod(cluster=_CLUSTER, namespace=namespace, pod=pod)
+    return await _k8s.get_pod(cluster=_cluster(), namespace=namespace, pod=pod)
 
 
 async def list_pod_events(namespace: str = "default", pod: str = "") -> dict:
     """Get Kubernetes events for one pod (reason/message/type), newest last."""
-    return await _k8s.get_events(cluster=_CLUSTER, namespace=namespace, resource=pod)
+    return await _k8s.get_events(cluster=_cluster(), namespace=namespace, resource=pod)
 
 
 async def get_container_logs(
@@ -53,10 +59,10 @@ async def get_container_logs(
     """Get container logs. When container is omitted the first container of the
     pod is used automatically."""
     if not container:
-        pod_raw = await _k8s.get_pod(cluster=_CLUSTER, namespace=namespace, pod=pod)
+        pod_raw = await _k8s.get_pod(cluster=_cluster(), namespace=namespace, pod=pod)
         container = _first_container_name(pod_raw) or "app"
     return await _k8s.get_logs(
-        cluster=_CLUSTER,
+        cluster=_cluster(),
         namespace=namespace,
         pod=pod,
         container=container,
@@ -67,14 +73,14 @@ async def get_container_logs(
 async def get_pod_metrics(namespace: str = "default", pod: str = "") -> dict:
     """Get container memory usage vs limit. Only pods whose containers ran
     have metrics — others return a NotAvailable error."""
-    return await _k8s.get_metrics(cluster=_CLUSTER, namespace=namespace, pod=pod)
+    return await _k8s.get_metrics(cluster=_cluster(), namespace=namespace, pod=pod)
 
 
 async def list_pods(namespace: str, label_selector: str | None = None) -> dict:
     """List pods in a namespace with phase/restart/reason summary. Use to
     discover or verify which pod matches the user's description."""
     return await _k8s.list_pods(
-        cluster=_CLUSTER, namespace=namespace, label_selector=label_selector
+        cluster=_cluster(), namespace=namespace, label_selector=label_selector
     )
 
 

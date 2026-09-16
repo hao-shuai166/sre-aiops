@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 from langgraph.graph import END, StateGraph
 
+from infrastructure_agent.agent.target_resolver import resolve_target
 from infrastructure_agent.domain.models import (
     AgentState,
     Diagnosis,
@@ -47,10 +48,6 @@ from infrastructure_agent.llm.agent_prompts import (
 from infrastructure_agent.tools.evidence_builder import EvidenceBuilder
 from infrastructure_agent.tools.k8s_tools import tool_registry
 from infrastructure_agent.tools.registry import ToolCache
-from infrastructure_agent.workflow.pod_crash_workflow import (
-    _parse_namespace,
-    _parse_pod_name,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -116,10 +113,11 @@ class InvestigationState(AgentState):
     error: str = ""
 
 
-# ---- Node: Initialize (rule-based candidate parsing — a hint, not truth) ----
+# ---- Node: Initialize (rule-based target parsing — a hint, not truth) ----
 
 def init_node(state: InvestigationState) -> dict:
     user_input = state.request.user_input or ""
+    target = resolve_target(user_input)
     return {
         "request": RequestContext(
             user_input=user_input,
@@ -143,8 +141,9 @@ def init_node(state: InvestigationState) -> dict:
             confidence=0.0,
             need_more_evidence=True,
         ),
-        "wf_pod": _parse_pod_name(user_input),
-        "wf_namespace": _parse_namespace(user_input),
+        "wf_pod": target.pod,
+        "wf_namespace": target.namespace,
+        "wf_cluster": target.cluster,
         "step": 0,
         "decision": {},
         "tool_results": [],

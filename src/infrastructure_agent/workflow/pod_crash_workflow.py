@@ -11,7 +11,6 @@ Evidence is built via EvidenceBuilder before entering AgentState.evidence.
 """
 
 import os
-import re
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
@@ -19,6 +18,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
 from infrastructure_agent.adapters.k8s_client import KubernetesClient
+from infrastructure_agent.agent.target_resolver import resolve_target
 from infrastructure_agent.domain.models import (
     AgentState,
     Diagnosis,
@@ -36,77 +36,6 @@ from infrastructure_agent.tools.evidence_builder import EvidenceBuilder
 
 _k8s = KubernetesClient(mode=os.getenv("K8S_MODE", "mock"))
 _builder = EvidenceBuilder()
-
-
-# 不应被当作 pod 名的状态词 / 命名空间词 / 结构词
-_STATUS_WORDS = {
-    "pending", "running", "succeeded", "failed", "unknown", "terminating",
-    "crashloopbackoff", "imagepullbackoff", "crashloop", "back-off", "backoff",
-    "crash", "error", "oomkilled", "oom", "ready", "notready",
-    "restart", "restarting", "restarted", "terminated", "completed", "waiting",
-    "containercreating", "starting", "init", "unschedulable",
-    "default", "production", "prod", "staging", "stage", "dev", "test",
-    "kube-system", "monitoring", "namespace", "ns", "pod", "deployment",
-    "service", "svc", "replicaset", "statefulset", "job", "cronjob", "name",
-}
-
-# K8s 标识符 token：小写字母/数字开头，可含中划线，字母/数字结尾
-_POD_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
-
-# 常见业务前缀，作为第二优先级兜底
-_COMMON_PREFIXES = (
-    "nginx", "app", "web", "api", "redis", "mysql", "postgres", "order",
-    "service", "gateway", "auth", "user", "admin", "frontend", "backend",
-    "sched", "test", "kube", "node", "etcd", "prometheus", "grafana",
-)
-
-_NAMESPACE_ALIASES = {
-    "default": "default", "production": "production", "prod": "prod",
-    "staging": "staging", "stage": "staging", "dev": "dev", "test": "test",
-    "kube-system": "kube-system", "monitoring": "monitoring",
-}
-
-
-def _parse_pod_name(user_input: str) -> str:
-    """Extract pod name from user input.
-
-    Priority:
-    1. token 含中划线（K8s pod 名几乎必带 `-`，如 sched-failpod / nginx-oom）
-    2. token 以已知业务前缀开头（nginx / app / web ...）
-    3. fallback "nginx"
-    状态词（pending / crashloopbackoff ...）与命名空间词一律排除。
-    """
-    tokens = _POD_TOKEN_RE.findall(user_input.lower())
-
-    hyphen_candidates: list[str] = []
-    prefix_candidates: list[str] = []
-    for t in tokens:
-        if t in _STATUS_WORDS:
-            continue
-        if "-" in t:
-            hyphen_candidates.append(t)
-        elif t.startswith(_COMMON_PREFIXES) and len(t) >= 2:
-            prefix_candidates.append(t)
-
-    for t in hyphen_candidates + prefix_candidates:
-        return t
-    return "nginx"
-
-
-def _parse_namespace(user_input: str) -> str:
-    lower = user_input.lower()
-    # 1. 显式上下文：`xxx命名空间` / `xxx namespace` / `xxx ns`
-    m = re.search(r"([a-z0-9-]+)\s*(?:命名空间|namespace|ns)", lower)
-    if m:
-        cand = _NAMESPACE_ALIASES.get(m.group(1))
-        if cand:
-            return cand
-    # 2. 直接匹配已知 namespace 词
-    for word in lower.split():
-        cleaned = re.sub(r"[^a-z0-9-]", "", word)
-        if cleaned in _NAMESPACE_ALIASES:
-            return _NAMESPACE_ALIASES[cleaned]
-    return "default"
 
 
 def _get_container_name(state: "WorkflowState") -> str:
@@ -159,8 +88,7 @@ class WorkflowState(AgentState):
 def init_state(state: WorkflowState) -> dict:
     """Set request context and intent from user input."""
     user_input = state.request.user_input or ""
-    pod = _parse_pod_name(user_input)
-    ns = _parse_namespace(user_input)
+    target = resolve_target(user_input)
 
     return {
         "request": RequestContext(
@@ -186,9 +114,9 @@ def init_state(state: WorkflowState) -> dict:
             need_more_evidence=True,
         ),
         # Store extracted pod info in evidence content for downstream use
-        "wf_pod": pod,
-        "wf_namespace": ns,
-        "wf_cluster": "prod",
+        "wf_pod": target.pod,
+        "wf_namespace": target.namespace,
+        "wf_cluster": target.cluster,
     }
 
 
