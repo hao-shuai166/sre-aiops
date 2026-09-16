@@ -145,6 +145,13 @@ async def _run_pod_diagnosis(user_input: str, user: str, intent: dict) -> dict:
     """Run the investigation workflow and return structured results."""
     graph = _get_workflow_graph()
 
+    # Request-scoped runtime (tool cache + evidence builder) — installed in
+    # the CALLER's task so every graph node sees it via ContextVar, even when
+    # the graph spawns child tasks. One runtime per request: concurrent
+    # diagnoses are fully isolated.
+    from infrastructure_agent.agent.agent_workflow import start_investigation_runtime
+    start_investigation_runtime()
+
     initial_state = AgentState(
         request=RequestContext(
             user_input=user_input,

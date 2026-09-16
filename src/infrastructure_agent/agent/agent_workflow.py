@@ -20,8 +20,10 @@ The fixed workflow stays available on this branch for A/B comparison via
 AGENT_WORKFLOW=fixed.
 """
 
+import contextvars
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from langgraph.graph import END, StateGraph
@@ -44,6 +46,7 @@ from infrastructure_agent.llm.agent_prompts import (
 )
 from infrastructure_agent.tools.evidence_builder import EvidenceBuilder
 from infrastructure_agent.tools.k8s_tools import tool_registry
+from infrastructure_agent.tools.registry import ToolCache
 from infrastructure_agent.workflow.pod_crash_workflow import (
     _parse_namespace,
     _parse_pod_name,
@@ -53,9 +56,50 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 8
 
-# Shared across investigations in one process — same trade-off as the fixed
-# workflow's module-level builder (IDs stay unique within one diagnosis).
-_builder = EvidenceBuilder()
+
+# ---- Request-scoped runtime ------------------------------------------------
+#
+# The compiled LangGraph graph is a process-level singleton, but mutable
+# per-investigation state (memoization cache + evidence counter) must NEVER
+# be. Each investigation creates one InvestigationRuntime, propagated to the
+# graph nodes via ContextVar — safe under concurrent asyncio requests because
+# every task tree copies its own context.
+
+
+@dataclass
+class InvestigationRuntime:
+    """Mutable state owned by a single investigation."""
+
+    cache: ToolCache = field(default_factory=ToolCache)
+    builder: EvidenceBuilder = field(default_factory=EvidenceBuilder)
+
+
+_runtime_var: contextvars.ContextVar[InvestigationRuntime] = contextvars.ContextVar(
+    "investigation_runtime"
+)
+
+
+def start_investigation_runtime() -> InvestigationRuntime:
+    """Create and install a fresh runtime for the current investigation.
+
+    Must be called ONCE per diagnosis, BEFORE graph.ainvoke() — setting the
+    ContextVar in the caller's task guarantees visibility in every node the
+    graph spawns (child tasks copy the parent context).
+    """
+    runtime = InvestigationRuntime()
+    _runtime_var.set(runtime)
+    return runtime
+
+
+def _current_runtime() -> InvestigationRuntime:
+    """Runtime for the running investigation; creates one as a safety net
+    when the graph is invoked directly (e.g. tests) without setup."""
+    try:
+        return _runtime_var.get()
+    except LookupError:
+        runtime = InvestigationRuntime()
+        _runtime_var.set(runtime)
+        return runtime
 
 
 class InvestigationState(AgentState):
@@ -76,13 +120,6 @@ class InvestigationState(AgentState):
 
 def init_node(state: InvestigationState) -> dict:
     user_input = state.request.user_input or ""
-    # Reset per-investigation state on the module-level singletons:
-    # - tool cache: memoization is scoped to ONE investigation; without this
-    #   reset a second diagnosis of the same pod would return stale data
-    #   from the first run (e.g. a CrashLoopBackOff pod whose state changed).
-    # - evidence counter: evidence IDs restart at ev001 for every diagnosis.
-    tool_registry.clear_cache()
-    _builder.reset_counter()
     return {
         "request": RequestContext(
             user_input=user_input,
@@ -339,7 +376,8 @@ async def execute_tool_node(state: InvestigationState) -> dict:
         args["namespace"] = state.wf_namespace
 
     spec = tool_registry.get(name)
-    raw = await tool_registry.call(name, args)
+    runtime = _current_runtime()
+    raw = await tool_registry.call(name, args, cache=runtime.cache)
 
     step = state.step + 1
     updates: dict = {
@@ -365,7 +403,7 @@ async def execute_tool_node(state: InvestigationState) -> dict:
     pod = str(args.get("pod", state.wf_pod))
 
     if spec is not None and spec.produces_evidence:
-        evidence: Evidence = _builder.build_from_tool_result(
+        evidence: Evidence = runtime.builder.build_from_tool_result(
             tool_name=name,
             raw=raw,
             namespace=ns,

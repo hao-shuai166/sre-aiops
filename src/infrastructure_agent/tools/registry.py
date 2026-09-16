@@ -61,13 +61,40 @@ class ToolSpec:
         return f"<ToolSpec {self.name}>"
 
 
+class ToolCache:
+    """Per-investigation memoization cache.
+
+    Keyed by (tool, args). One instance per investigation (owned by
+    InvestigationRuntime) — never shared across requests, so concurrent
+    investigations cannot interfere with each other's snapshots.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, dict[str, Any]] = {}
+        self.hits = 0
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        if key in self._entries:
+            self.hits += 1
+            return self._entries[key]
+        return None
+
+    def put(self, key: str, raw: dict[str, Any]) -> None:
+        self._entries[key] = raw
+
+    @property
+    def size(self) -> int:
+        return len(self._entries)
+
+
 class ToolRegistry:
-    """Holds registered tools and executes them with argument validation + memoization."""
+    """Holds registered tool definitions (immutable) and executes them with
+    argument validation. Memoization is request-scoped: pass a ToolCache to
+    call(); the registry itself holds NO mutable state.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
-        self._cache: dict[str, dict[str, Any]] = {}
-        self._cache_hits = 0
 
     # ---- Registration ----
 
@@ -90,19 +117,11 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         return list(self._tools)
 
-    # ---- Cache ----
+    # ---- Cache key ----
 
     @staticmethod
-    def _cache_key(name: str, args: dict[str, Any]) -> str:
+    def cache_key(name: str, args: dict[str, Any]) -> str:
         return f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
-
-    def clear_cache(self) -> None:
-        self._cache.clear()
-        self._cache_hits = 0
-
-    @property
-    def cache_hits(self) -> int:
-        return self._cache_hits
 
     # ---- Execution ----
 
@@ -117,8 +136,17 @@ class ToolRegistry:
         missing = [k for k in schema.get("required", []) if k not in clean]
         return clean, missing
 
-    async def call(self, name: str, args: dict[str, Any] | None) -> dict[str, Any]:
-        """Validate and execute one tool call with memoization.
+    async def call(
+        self,
+        name: str,
+        args: dict[str, Any] | None,
+        cache: ToolCache | None = None,
+    ) -> dict[str, Any]:
+        """Validate and execute one tool call.
+
+        ``cache`` scopes memoization to a single investigation (recommended);
+        omitting it executes without caching — the registry never keeps
+        per-request state itself.
 
         Never raises on tool faults — returns the adapter's raw error dict so
         the agent loop can keep going. The caller (P1 execute_tool) is
@@ -140,10 +168,11 @@ class ToolRegistry:
                 "message": f"Tool '{name}' missing required arguments: {', '.join(missing)}",
             }
 
-        key = self._cache_key(name, clean_args)
-        if key in self._cache:
-            self._cache_hits += 1
-            return self._cache[key]
+        key = self.cache_key(name, clean_args)
+        if cache is not None:
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
 
         started = time.monotonic()
         try:
@@ -157,5 +186,6 @@ class ToolRegistry:
             }
         duration_ms = int((time.monotonic() - started) * 1000)
         raw.setdefault("_meta", {})["duration_ms"] = duration_ms
-        self._cache[key] = raw
+        if cache is not None:
+            cache.put(key, raw)
         return raw
