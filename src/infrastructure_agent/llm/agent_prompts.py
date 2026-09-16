@@ -27,6 +27,10 @@ Investigation guidelines:
    is sufficient; do not over-investigate.
 5. The user's description may be imprecise (wrong pod name, wrong status word) —
    verify with tools before trusting it.
+6. The final answer MUST cite supporting evidence in the "evidence" array,
+   using only IDs shown in 已收集证据. Error evidence (confidence 0, e.g.
+   NotAvailable) may be cited as exclusionary support, but at least one
+   valid evidence (confidence > 0) must be included.
 
 Output MUST be a single JSON object, in one of two shapes:
 
@@ -44,6 +48,7 @@ To conclude the investigation:
   "thought": "one-line summary of what the evidence shows",
   "problem": "问题定性（中文，如：Pod OOMKilled）",
   "root_cause": "根因分析结论（中文，引用证据 ID，如 ev002）",
+  "evidence": ["ev001", "ev002"],
   "suggestion": "可操作的修复建议（中文，分号分隔多条）",
   "confidence": 0.85
 }
@@ -150,5 +155,7 @@ def build_forced_final_prompt(
 
 ## 任务
 调查步数已达上限，不能再调用任何工具。请基于已收集的证据给出最佳判断：
-next 必须为 "answer"。如果证据不足以确定根因，如实说明，降低 confidence，
+next 必须为 "answer"，并在 evidence 数组中引用支持结论的证据 ID
+（错误类证据只能作排除性依据，至少需引用一条有效证据）。
+如果证据不足以确定根因，如实说明，降低 confidence，
 并在 suggestion 中列出还需要哪些证据。只输出一个 JSON 对象，不要输出其他文字。"""

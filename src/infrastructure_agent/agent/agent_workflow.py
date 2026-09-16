@@ -131,8 +131,61 @@ def _valid_tool_decision(d: object) -> bool:
 def _valid_answer_decision(d: object) -> bool:
     if not isinstance(d, dict) or d.get("next") != "answer":
         return False
-    return all(
+    if not all(
         isinstance(d.get(k), str) and d[k].strip() for k in ("problem", "root_cause", "suggestion")
+    ):
+        return False
+    refs = d.get("evidence")
+    return isinstance(refs, list) and len(refs) > 0 and all(
+        isinstance(r, str) and r.strip() for r in refs
+    )
+
+
+def _evidence_ref_error(decision: dict, evidence_list: list[Evidence]) -> str | None:
+    """Cross-check the answer's evidence references against collected evidence.
+
+    Rules (evidence-driven trust):
+    - every referenced ID must exist in this investigation;
+    - at least one referenced evidence must be non-error (confidence > 0).
+      Error evidence (e.g. NotAvailable) is legitimate exclusionary support,
+      but it cannot be the ONLY support for a conclusion.
+
+    Returns None when acceptable, else a reason for the corrective retry.
+    """
+    refs = decision.get("evidence") or []
+    known = {ev.id for ev in evidence_list}
+    unknown = [r for r in refs if r not in known]
+    if unknown:
+        valid = ", ".join(sorted(known)) or "（本次调查没有任何证据）"
+        return f"引用了本次调查中不存在的证据 ID：{', '.join(unknown)}；有效 ID：{valid}"
+    if not any(ev.confidence > 0.0 for ev in evidence_list if ev.id in refs):
+        return (
+            "结论的 evidence 至少要包含一条有效证据（confidence > 0）。"
+            "错误类证据只能作为排除性依据，不能单独支持结论"
+        )
+    return None
+
+
+def _decision_error(
+    decision: object, forced: bool, evidence_list: list[Evidence]
+) -> str | None:
+    """Full validation of an LLM decision; None means acceptable."""
+    if isinstance(decision, dict) and decision.get("next") == "tool":
+        if forced:
+            return '步数已耗尽，禁止再调用工具；next 必须为 "answer"'
+        if tool_registry.get(decision.get("tool", "")) is None:
+            known = ", ".join(tool_registry.tool_names())
+            return f"工具名 {decision.get('tool')!r} 不存在；可用工具：{known}"
+        if not isinstance(decision.get("args") or {}, dict):
+            return "tool 决策的 args 必须是对象"
+        return None
+    if _valid_answer_decision(decision):
+        assert isinstance(decision, dict)
+        return _evidence_ref_error(decision, evidence_list)
+    return (
+        "输出必须是 next=\"tool\"（含合法 tool/args）或 next=\"answer\""
+        "（含 problem/root_cause/suggestion/evidence/confidence，其中 evidence "
+        "为非空字符串数组）之一的 JSON 对象"
     )
 
 
@@ -144,21 +197,9 @@ def _clamp_confidence(value: object) -> float:
     return max(0.0, min(1.0, c))
 
 
-def _retry_note(decision: object, forced: bool) -> str:
+def _retry_note(error: str) -> str:
     """Correction hint appended when the LLM produced an invalid decision."""
-    if isinstance(decision, dict) and decision.get("next") == "tool":
-        known = ", ".join(tool_registry.tool_names())
-        return (
-            f"\n\n## 上一次输出无效\n你给出的工具名 {decision.get('tool')!r} 不存在。"
-            f"可用工具：{known}。请重新输出一个合法 JSON 对象。"
-        )
-    if forced:
-        return "\n\n## 上一次输出无效\n步数已耗尽，禁止再调用工具。next 必须为 \"answer\"。"
-    return (
-        "\n\n## 上一次输出无效\n输出必须是 next=\"tool\"（含合法 tool/args）或 "
-        "next=\"answer\"（含 problem/root_cause/suggestion/confidence）之一的 JSON 对象。"
-        "请重新输出。"
-    )
+    return f"\n\n## 上一次输出无效\n{error}。请重新输出一个合法 JSON 对象。"
 
 
 # ---- Node: Agent (LLM decision) ----
@@ -200,26 +241,22 @@ async def agent_node(state: InvestigationState) -> dict:
         temperature=0.2,
         max_tokens=1200,
     )
-    valid = _valid_answer_decision(decision) if forced else (
-        _valid_tool_decision(decision) or _valid_answer_decision(decision)
-    )
+    error = _decision_error(decision, forced, state.evidence)
 
-    if not valid:
-        # One retry with a correction hint.
+    if error:
+        # One retry with a targeted correction hint.
         decision = await llm.generate_structured(
             system_prompt=AGENT_SYSTEM_PROMPT,
-            user_prompt=prompt + _retry_note(decision, forced),
+            user_prompt=prompt + _retry_note(error),
             temperature=0.2,
             max_tokens=1200,
         )
-        valid = _valid_answer_decision(decision) if forced else (
-            _valid_tool_decision(decision) or _valid_answer_decision(decision)
-        )
+        error = _decision_error(decision, forced, state.evidence)
 
-    if not valid:
+    if error:
         return {
             "rca_mode": "error",
-            "error": "LLM 输出不符合决策格式（重试后仍无效），调查中断",
+            "error": f"LLM 决策无效（重试后仍不通过）：{error}。调查中断",
             "execution": ExecutionState(
                 current_workflow="agent_investigation",
                 current_step="agent",
@@ -232,7 +269,7 @@ async def agent_node(state: InvestigationState) -> dict:
         diagnosis = Diagnosis(
             problem=decision["problem"],
             root_cause=decision["root_cause"],
-            evidence=[ev.id for ev in state.evidence],
+            evidence=decision["evidence"],
             suggestion=decision["suggestion"],
             confidence=_clamp_confidence(decision.get("confidence")),
         )
