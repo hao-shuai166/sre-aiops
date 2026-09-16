@@ -182,5 +182,7 @@ def build_k8s_tool_registry() -> ToolRegistry:
     return registry
 
 
-# Module-level singleton so memoization survives across calls within one process.
+# Module-level singleton. The memoization cache is scoped to a single
+# investigation — agent_workflow.init_node calls clear_cache() at the start
+# of every diagnosis so results never leak across requests.
 tool_registry = build_k8s_tool_registry()

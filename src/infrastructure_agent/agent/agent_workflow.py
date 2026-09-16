@@ -76,6 +76,13 @@ class InvestigationState(AgentState):
 
 def init_node(state: InvestigationState) -> dict:
     user_input = state.request.user_input or ""
+    # Reset per-investigation state on the module-level singletons:
+    # - tool cache: memoization is scoped to ONE investigation; without this
+    #   reset a second diagnosis of the same pod would return stale data
+    #   from the first run (e.g. a CrashLoopBackOff pod whose state changed).
+    # - evidence counter: evidence IDs restart at ev001 for every diagnosis.
+    tool_registry.clear_cache()
+    _builder.reset_counter()
     return {
         "request": RequestContext(
             user_input=user_input,
@@ -334,7 +341,9 @@ async def execute_tool_node(state: InvestigationState) -> dict:
         ReasoningStep(
             step=len(state.reasoning) + 1,
             observation=f"Tool {name} → {_summarize_raw(raw)}",
-            conclusion=str(decision.get("thought", "")) or "收到工具结果，返回 Agent 决策",
+            # Deliberately NOT the decision's thought (already shown on the
+            # previous step) — this step only records that the tool ran.
+            conclusion=f"工具 {name} 执行完毕，结果已返回，等待 Agent 下一步决策",
         )
     ]
     return updates
